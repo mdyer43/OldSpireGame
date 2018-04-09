@@ -1,0 +1,690 @@
+using System.Collections;
+using System.Collections.Generic;
+using UnityEngine;
+using RPG.CameraUI;
+
+namespace RPG.Characters
+{
+    public class InputHandler : MonoBehaviour
+    {
+        float turnAmount;
+        float forwardAmount;
+
+        float vertical;
+        float horizontal;
+        bool b_input;
+        bool a_input;
+        bool x_input;
+        bool y_input;
+        bool select;
+
+        bool rb_input;
+        float rt_axis;
+        bool rt_input;
+        bool lb_input;
+        float lt_axis;
+        bool lt_input;
+
+        float d_y;
+        float d_x;
+        bool d_up;
+        bool d_down;
+        bool d_right;
+        bool d_left;
+
+        bool p_d_up;
+        bool p_d_down;
+        bool p_d_left;
+        bool p_d_right;
+
+        bool leftAxis_down;
+        bool rightAxis_down;
+
+        float b_timer;
+        float lStick_timer;
+        float delta;
+        [HideInInspector]
+        public Vector3 aimPosition;
+        [HideInInspector]
+        public bool isDrawing;
+
+        //Footsteps
+        [SerializeField] private bool m_IsWalking;
+        private float m_StepCycle;
+        private float m_NextStep;
+        [SerializeField] [Range(0f, 1f)] private float m_RunstepLenghten;
+        [SerializeField] private float m_StepInterval;
+
+        [Header("Audio")]
+        private AudioSource m_AudioSource;
+        [SerializeField] AudioSource attackAudioSource;
+        [SerializeField] private AudioClip[] m_FootstepSounds;
+        [SerializeField] private AudioClip[] m_AttackSounds;
+        [SerializeField] private AudioClip m_LandSound;
+        [SerializeField] private AudioClip m_JumpSound;
+        [SerializeField] private AudioClip openUIAudio;
+
+        [HideInInspector]
+        public StateManager states;
+        CameraManager camManager;
+        UIManager uiManager;
+        DialogueManager dialogueManager;
+        RPG.UI.InventoryUI invUI;
+        [HideInInspector]
+        public static InputHandler singleton;
+
+        private void Awake()
+        {
+            singleton = this;
+        }
+
+        void Start()
+        {
+            m_AudioSource = GetComponent<AudioSource>();
+
+            QuickSlot.singleton.Init();
+
+            states = GetComponent<StateManager>();
+            states.Init();
+
+            camManager = GameObject.FindGameObjectWithTag("CameraManager").GetComponent<CameraManager>();
+            camManager.Init(states);
+
+            uiManager = UIManager.singleton;
+            invUI = RPG.UI.InventoryUI.singleton;
+            invUI.Init(states.inventoryManager);
+            dialogueManager = DialogueManager.singleton;
+        }
+
+        void FixedUpdate()
+        {
+            delta = Time.fixedDeltaTime;
+            GetInput();
+            HandleUI();
+            UpdateStates();
+            states.FixedTick(delta);
+            camManager.Tick(delta);
+        }
+
+        bool preferItem;
+
+        void Update()
+        {
+            delta = Time.deltaTime;
+            states.Tick(delta);
+            AimPosition();
+
+            rb_input = Input.GetButtonDown(StaticStrings.RB);
+
+            #region UIMenu
+            if (invUI.isMenu)
+            {
+                uiManager.CloseAnnounceType();
+                invUI.Tick();
+            }
+            else
+            {
+                if (!dialogueManager.dialogueActive)
+                {
+                    if (states.pickManager.itemCandidate != null || states.pickManager.interCandidate)
+                    {
+                        if (states.pickManager.itemCandidate && states.pickManager.interCandidate)
+                        {
+                            if (preferItem)
+                            {
+                                PickUpItem();
+                            }
+                            else
+                            {
+                                Interact();
+                            }
+                        }
+                        else
+                        {
+                            if (states.pickManager.itemCandidate && !states.pickManager.interCandidate)
+                            {
+                                PickUpItem();
+                            }
+
+                            if (states.pickManager.interCandidate && states.pickManager.itemCandidate == null)
+                            {
+                                Interact();
+                            }
+                        }
+                    }
+                    else
+                    {
+                        uiManager.CloseAnnounceType();
+
+                        if (a_input)
+                        {
+                            uiManager.CloseCards();
+                            a_input = false;
+                        }
+                    }
+                }
+                else
+                    {
+                        uiManager.CloseAnnounceType();
+                    }
+            }
+            #endregion
+
+            dialogueManager.Tick(a_input);
+            states.MonitorStats();
+            ResetInputNStates();
+
+            uiManager.Tick(states.characterStats, delta);
+
+            OpenMenu();
+        }
+
+        void PickUpItem()
+        {
+            uiManager.OpenAnnounceType(UIActionType.pickup);
+
+            if (a_input)
+            {
+                Debug.Log("Picked Up");
+                Vector3 td = states.pickManager.itemCandidate.transform.position - transform.position;
+                states.SnapToRotation(td);
+                states.pickManager.PickCanidate();
+                states.anim.CrossFade(StaticStrings.pick_up, .2f);
+                //states.PlayAnimation(StaticStrings.pick_up);
+                a_input = false;
+            }
+        }
+
+        void Interact()
+        {
+            uiManager.OpenAnnounceType(states.pickManager.interCandidate.actionType);
+
+            if (a_input)
+            {
+                Debug.Log("Interaction");
+                states.InteractLogic();
+                a_input = false;
+            }
+        }
+
+        void GetInput()
+        {
+            vertical = Input.GetAxis(StaticStrings.Vertical);
+            horizontal = Input.GetAxis(StaticStrings.Horizontal);
+
+            //rb_input = Input.GetButton(StaticStrings.RB);
+            lb_input = Input.GetButton(StaticStrings.LB);
+            b_input = Input.GetButton(StaticStrings.B);
+            a_input = Input.GetButtonUp(StaticStrings.A);
+            x_input = Input.GetButton(StaticStrings.X);
+            y_input = Input.GetButtonDown(StaticStrings.Y);
+
+
+            #region Triggers
+            rt_input = Input.GetButton(StaticStrings.RT);
+            rt_axis = Input.GetAxis(StaticStrings.RT);
+            if (rt_axis != 0)
+            {
+                rt_input = true;
+
+            }
+
+            lt_input = Input.GetButton(StaticStrings.LT);
+            lt_axis = Input.GetAxis(StaticStrings.LT);
+            if (lt_axis != 0)
+            {
+                lt_input = true;
+            }
+
+            #endregion
+
+            leftAxis_down = Input.GetButtonUp(StaticStrings.L) || Input.GetKeyUp(KeyCode.Alpha6);
+            rightAxis_down = Input.GetButtonUp(StaticStrings.R) || Input.GetKeyUp(KeyCode.T);
+
+            if (leftAxis_down)
+            {
+                lStick_timer += delta;
+            }
+            if (b_input)
+            {
+            b_timer += delta;
+            }
+
+            d_x = Input.GetAxis(StaticStrings.Pad_X);
+            d_y = Input.GetAxis(StaticStrings.Pad_Y);
+
+            d_up = Input.GetKeyUp(KeyCode.Alpha1) || d_y > 0;
+            d_down = Input.GetKeyUp(KeyCode.Alpha2) || d_y < 0;
+            d_left = Input.GetKeyUp(KeyCode.Alpha3) || d_x < 0;
+            d_right = Input.GetKeyUp(KeyCode.Alpha4) || d_x > 0;
+        }
+
+        void HandleUI()
+        {
+                curUIstate = UIState.game;
+            if (invUI.isMenu)
+            {
+                curUIstate = UIState.inventory;
+            }
+
+            switch (curUIstate)
+            {
+                case UIState.game:
+                    HandleQuickSLotChanges();
+                    break;
+                case UIState.inventory:
+                    break;
+                default:
+                    break;
+            }
+
+        }
+
+        UIState curUIstate;
+        enum UIState
+        {
+            game,inventory
+        }
+
+        void AimPosition()
+        {
+            Ray ray = new Ray(camManager.camTrans.position, camManager.camTrans.forward);
+            aimPosition = ray.GetPoint(30);
+
+            RaycastHit hit;
+            if (Physics.Raycast(ray, out hit, 100, states.ignoreLayers))
+            {
+                aimPosition = hit.point;
+            }
+        }
+
+        void UpdateStates()
+        {
+            states.horizontal = horizontal;
+            states.vertical = vertical;
+
+            Vector3 v = vertical * camManager.transform.forward;
+            Vector3 h = horizontal * camManager.transform.right;
+            ProcessDirectMovement();
+            float speed;
+            states.GetRun(out speed);
+            ProgressStepCycle(speed);
+
+            if (invUI.isMenu)
+                return;
+            #region Running
+            m_IsWalking = !states.run;
+            if (b_input && b_timer > 0.3f)
+            {
+                states.run = (states.moveAmount > 0) && states.characterStats._stamina > 0;
+                states.isAiming = false;
+                states.HandleAiming();
+            }
+
+            if (states.run)
+            {
+                if (leftAxis_down)
+                {
+                    PlayJumpSound();
+                    states.Jump();
+                }
+            }
+
+            if (b_input == false && b_timer > 0 && b_timer < 0.5f && states.isRolling == false)
+            {
+                states.rollInput = true;
+                states.isRolling = true;
+            }
+
+            if (states.rollInput == true)
+            {
+                StartCoroutine(Rolled());
+            }
+            #endregion
+            states.rt = rt_input;
+            states.lt = lt_input;
+            states.rb = rb_input;
+            states.lb = lb_input;
+
+            //use item
+            if (x_input)
+            {
+                b_input = false;
+                StartCoroutine(UsedItem());
+            }
+
+            //Draw
+            if (y_input)
+            {
+                DrawRanged();
+            }
+
+//Disabled         
+#region Lockon
+            //if (states.lockOntarget != null)
+            //{
+            //    if (states.lockOntarget.estates.isDead)
+            //    {
+            //        states.lockOn = false;
+            //        states.lockOntarget = null;
+            //        states.lockOnTransform = null;
+            //        camManager.lockon = false;
+            //        camManager.lockOnTarget = null;
+            //    }
+            //}
+            //else
+            //{
+            //    states.lockOn = false;
+            //    states.lockOntarget = null;
+            //    states.lockOnTransform = null;
+            //    camManager.lockon = false;
+            //    camManager.lockOnTarget = null;
+            //}
+            //lock on
+            //if (rightAxis_down)
+            //{
+            //    states.lockOn = !states.lockOn;
+
+            //    states.lockOntarget = EnemyManager.singleton.GetEnemy(transform.position);
+
+            //    if (states.lockOntarget == null)
+            //    {
+            //        states.lockOn = false;
+            //    }
+            //    else
+            //    {
+            //        camManager.lockOnTarget = states.lockOntarget;
+            //        states.lockOnTransform = states.lockOntarget.GetTarget();
+            //        camManager.lockOnTransform = states.lockOnTransform;
+            //        camManager.lockon = states.lockOn;
+            //    }
+            //}
+#endregion
+
+            HandleQuickSLotChanges();
+        }
+
+        void OpenMenu()
+        {
+            bool menu = Input.GetButtonDown(StaticStrings.start);
+            bool select = Input.GetButtonUp(StaticStrings.select);
+
+            if (menu)
+            {
+                invUI.isMenu = !invUI.isMenu;
+
+                if (invUI.isMenu)
+                {
+                    invUI.OpenUI();
+                    m_AudioSource.PlayOneShot(openUIAudio);
+                }
+                else
+                {
+                    m_AudioSource.PlayOneShot(openUIAudio);
+                    invUI.CloseUI();
+                }
+            }
+        }
+
+        void DrawRanged()
+        {
+            if (states.pickManager.itemCandidate && states.pickManager.interCandidate)
+            {
+                preferItem = !preferItem;
+            }
+            else
+            {
+                if (isDrawing == false)
+                {
+                    if (states.inventoryManager.curGun != states.inventoryManager.unarmedRuntime)
+                    {
+                        isDrawing = true;
+                        uiManager.meleeUI.SetActive(false);
+                        uiManager.gunUI.SetActive(true);
+                        states.inventoryManager.EquipWeapon(states.inventoryManager.curGun, false);
+                        states.inventoryManager.leftHandWeapon = states.inventoryManager.unarmedRuntime;
+                        states.actionManager.UpdateActionsOneHanded();
+                    }
+                }
+                else
+                {
+                    HolsterRanged();
+                }
+            }
+        }
+
+        public void HolsterRanged()
+        {
+            if (isDrawing == true)
+            {
+                isDrawing = false;
+                states.isAiming = false;
+                uiManager.meleeUI.SetActive(true);
+                uiManager.gunUI.SetActive(false);
+                states.HandleAiming();
+                states.inventoryManager.EquipWeapon(states.inventoryManager.rh_indexes[0]);
+                states.actionManager.UpdateActionsOneHanded();
+
+            }
+        }
+
+        void HandleQuickSLotChanges()
+        {
+            if (states.isSpellcasting || states.usingItem)
+                return;
+
+            //change spells
+            if (d_up)
+            {
+                if (!p_d_up)
+                {
+                    p_d_up = true;
+                    states.inventoryManager.ChangeToNextSpell();
+                }
+            }
+
+            if (d_down)
+            {
+                if (!p_d_down)
+                {
+                    p_d_down = true;
+                    states.inventoryManager.ChangeToNextConsumable();
+                }
+            }
+
+            if (!d_up)
+                p_d_up = false;
+            if (!d_down)
+                p_d_down = false;
+
+            if (states.onEmpty == false)
+                return;
+            //if (states.isTwoHanded)
+            //    return;
+
+            if (d_left)
+            {
+                if (!p_d_left)
+                {
+                    states.inventoryManager.ChangeToNextWeapon(true);
+                    p_d_left = true;
+                }
+            }
+            if (d_right)
+            {
+                if (!p_d_right)
+                {
+                    states.inventoryManager.ChangeToNextWeapon(false);
+                    p_d_right = true;
+                }
+            }
+
+            if (!d_left)
+                p_d_left = false;
+            if (!d_right)
+                p_d_right = false;
+        }
+
+        void ResetInputNStates()
+        {
+            if (a_input)
+                a_input = false;
+            if (b_input == false)
+            {
+                b_timer = 0f;
+                states.run = false;
+            }
+            //if(leftAxis_down == false)
+            //{
+            //    lStick_timer = 0f;
+            //    states.run = false;
+            //}
+            if (states.rollInput)
+            {
+                states.rollInput = false;
+            }
+        }
+
+        private IEnumerator Rolled()
+        {
+            if (states.rollInput)
+            {
+                states.rigidBody.drag = 0f;
+                states.rigidBody.angularDrag = 0f;
+                yield return new WaitForSeconds(1.5f);
+                states.isRolling = false;
+            }
+        }
+        private IEnumerator UsedItem()
+        {
+            states.itemInput = true;
+            yield return new WaitForSeconds(1.5f);
+            states.itemInput = false;
+        }
+
+        public void PlayAttackSound()
+        {
+            int n = Random.Range(1, m_AttackSounds.Length);
+            attackAudioSource.clip = m_AttackSounds[n];
+            attackAudioSource.PlayOneShot(attackAudioSource.clip);
+            // move picked sound to index 0 so it's not picked next time
+            m_AttackSounds[n] = m_AttackSounds[0];
+            m_AttackSounds[0] = attackAudioSource.clip;
+        }
+
+        #region Moving
+        void ProcessDirectMovement()
+        {
+            if (states.isAlive || states.canMove)
+            {
+                float rotation = Input.GetAxis("Horizontal");
+                float translation = Input.GetAxis("Vertical");
+                states.horizontal = horizontal;
+                states.vertical = vertical;
+
+                //calculate speed for animations
+                states.playerInput.Set(rotation, 0f, translation);
+                float speed = states.playerInput.sqrMagnitude;
+
+                Vector3 v = vertical * camManager.transform.forward;
+                Vector3 h = horizontal * camManager.transform.right;
+                states.playerInput = (v + h).normalized;
+                float m = Mathf.Abs(horizontal) + Mathf.Abs(vertical);
+                states.moveAmount = Mathf.Clamp01(m);
+                states.rotateDirection = camManager.mTransform.forward;
+                Move(states.playerInput);
+            }
+            else if (states.canMove == false)
+            {
+                Vector3 movement = Vector3.zero;
+                Move(movement);
+            }
+        }
+
+        public float GetAnimSpeedMultiplier()
+        {
+            return states.anim.speed;
+        }
+
+        void Move(Vector3 movement)
+        {
+            ApplyExtraTurnRotation();
+            SetForwardAndTurn(movement);
+            UpdateAnimator();
+        }
+
+        void ApplyExtraTurnRotation()
+        {
+            // help the character turn faster (this is in addition to root rotation in the animation)
+            float turnSpeed = Mathf.Lerp(states.stationaryTurnSpeed, states.movingTurnSpeed, forwardAmount);
+            transform.Rotate(0, turnAmount * turnSpeed * Time.deltaTime, 0);
+        }
+
+        private void SetForwardAndTurn(Vector3 movement)
+        {
+            // convert the world relative moveInput vector into a local-relative
+            // turn amount and forward amount required to head in the desired  direction.
+            if (movement.magnitude > states.moveThreshold)
+            {
+                movement.Normalize();
+            }
+            var localMove = transform.InverseTransformDirection(movement);
+            turnAmount = Mathf.Atan2(localMove.x, localMove.z);
+            forwardAmount = localMove.z;
+        }
+
+        void UpdateAnimator()
+        {
+            states.anim.SetFloat("Forward", forwardAmount, 0.1f, Time.deltaTime);
+            states.anim.SetFloat("Turn", turnAmount, 0.1f, Time.deltaTime);
+            states.anim.speed = states.animationSpeedMultiplier;
+        }
+
+        void ProgressStepCycle(float speed)
+        {
+            if (states.rigidBody.velocity.sqrMagnitude > 0 && (states.playerInput.x != 0 || states.playerInput.y != 0))
+            {
+                m_StepCycle += (states.rigidBody.velocity.magnitude + (speed * (m_IsWalking ? 1f : m_RunstepLenghten))) *
+                             Time.fixedDeltaTime;
+            }
+
+            if (!(m_StepCycle > m_NextStep))
+            {
+                return;
+            }
+            m_NextStep = m_StepCycle + m_StepInterval;
+
+            PlayFootStepAudio();
+        }
+
+        private void PlayFootStepAudio()
+        {
+            if (!states.onGround)
+            {
+                return;
+            }
+
+            int n = Random.Range(1, m_FootstepSounds.Length);
+            m_AudioSource.clip = m_FootstepSounds[n];
+            m_AudioSource.PlayOneShot(m_AudioSource.clip);
+            // move picked sound to index 0 so it's not picked next time
+            m_FootstepSounds[n] = m_FootstepSounds[0];
+            m_FootstepSounds[0] = m_AudioSource.clip;
+        }
+
+        public void PlayLandingSound()
+        {
+            m_AudioSource.clip = m_LandSound;
+            m_AudioSource.Play();
+            m_NextStep = m_StepCycle + .5f;
+        }
+
+        private void PlayJumpSound()
+        {
+            m_AudioSource.clip = m_JumpSound;
+            m_AudioSource.Play();
+            m_NextStep = m_StepCycle + .5f;
+        }
+        #endregion
+    }
+}
