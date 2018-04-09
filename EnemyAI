@@ -1,0 +1,121 @@
+using UnityEngine;
+using System.Collections;
+using System.Collections.Generic;
+using System;
+
+namespace RPG.Characters
+{
+    [RequireComponent(typeof(WeaponSystems))]
+    [RequireComponent(typeof(EnemyCharacter))]
+    [RequireComponent(typeof(HealthSystem))]
+    public class EnemyAIscript : MonoBehaviour
+    {
+        [SerializeField] float chaseRadius;
+        [SerializeField] WaypointContainer patrolPath;
+        [SerializeField] float waypointTolerance;
+        [SerializeField] float waypointDwellTime = 1f;
+
+
+        public GameObject player;
+        EnemyCharacter character;
+        int nextWayPointIndex;
+        float currentWeaponRange;
+        float distanceToPlayer;
+
+        enum State { idle, patroling, attacking, chasing}
+        State state = State.idle;
+
+        void Start()
+        {
+            character = GetComponent<EnemyCharacter>();
+            player = GameObject.FindGameObjectWithTag("Controller");
+        }
+
+        void Update()
+        {
+            distanceToPlayer = Vector3.Distance(player.transform.position, transform.position);
+            
+            WeaponSystems weaponSystem = GetComponent<WeaponSystems>();
+
+            currentWeaponRange = weaponSystem.GetCurrentWeapon().GetMaxAttackRange();
+
+            bool inWeaponRange = distanceToPlayer <= currentWeaponRange;
+            bool inChaseRadius = distanceToPlayer > currentWeaponRange 
+                                && 
+                                distanceToPlayer <= chaseRadius;
+            bool outsideChaseRadius = distanceToPlayer > chaseRadius;
+
+            if (character.canMove == false)
+                return;
+
+            if (outsideChaseRadius)
+            {
+                StopAllCoroutines();
+                weaponSystem.StopAttacking();
+                StartCoroutine(Patrol());
+            }
+            if (inChaseRadius)
+            {
+                StopAllCoroutines();
+                weaponSystem.StopAttacking();
+                StartCoroutine(ChasePlayer());
+            }
+            if(inWeaponRange)
+            {
+                StopAllCoroutines();
+                state = State.attacking;
+                weaponSystem.AttackTarget(player.gameObject);
+            }
+        }
+        IEnumerator Patrol()
+        {
+            state = State.patroling;
+
+            while (patrolPath != null)
+            {
+                float value = .5f;
+                character.SetAnimatorForwardCap(value);
+                Vector3 nextWaypointPos = patrolPath.transform.GetChild(nextWayPointIndex).position;
+                character.SetDestination(nextWaypointPos);
+                CycleWayPointWhenClose(nextWaypointPos);
+                yield return new WaitForSeconds(waypointDwellTime);
+            }
+        }
+
+        private void CycleWayPointWhenClose(Vector3 nextWaypointPos)
+        {
+            if (Vector3.Distance(transform.position, nextWaypointPos) <= waypointTolerance)
+            {
+                nextWayPointIndex = (nextWayPointIndex + 1) % patrolPath.transform.childCount;
+            }
+        }
+
+        IEnumerator ChasePlayer()
+        {
+            state = State.chasing;
+
+            if (character.isAlive)
+            {
+                while (distanceToPlayer >= currentWeaponRange)
+                {
+                    float value = 1f;
+                    character.SetAnimatorForwardCap(value);
+                    character.SetDestination(player.transform.position);
+                    yield return new WaitForEndOfFrame();
+                }
+            }
+        }
+
+        void OnDrawGizmos()
+        {
+            //Draw attack sphere
+            Gizmos.color = new Color(255f, 0f, 0f, .5f);
+            Gizmos.DrawWireSphere(transform.position, currentWeaponRange);
+
+            //draw move sphere
+            Gizmos.color = new Color(0f, 0f, 255f, .5f);
+            Gizmos.DrawWireSphere(transform.position, chaseRadius);
+
+        }
+    }
+}
