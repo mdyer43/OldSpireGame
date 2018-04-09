@@ -1,0 +1,214 @@
+using System.Collections;
+using UnityEngine;
+using UnityEngine.Assertions;
+
+namespace RPG.Characters
+{
+    public class WeaponSystems : MonoBehaviour
+    {
+        [SerializeField] float baseDamage = 10f;
+        [SerializeField] WeaponConfig currentWeaponConfig = null;
+        [SerializeField] float attackDelay = .5f;
+        float lastHitTime;
+        public AnimationClip[] attackanimations;
+        private AudioSource attackAudioSource;
+        [SerializeField] private AudioClip[] m_AttackSounds;
+        //string targetAnim;
+
+        Animator animator;
+        EnemyCharacter character;
+        [HideInInspector]
+        public GameObject player;
+        [HideInInspector]
+        public GameObject target;
+        GameObject weaponObject;
+        HealthSystem healthSystem;
+        WeaponHook w_hook;
+
+        //ranged attack
+        public bool isRangedAttacker = false;
+        [SerializeField] GameObject projectileToUse;
+        [SerializeField] GameObject projectileSocket;
+        [SerializeField] Vector3 aimOffset = new Vector3(0f, 1f, 0f);
+
+        void Start()
+        {
+            animator = GetComponentInChildren<Animator>();
+            character = GetComponent<EnemyCharacter>();
+            player = GameObject.FindGameObjectWithTag("Player");
+            attackAudioSource = GetComponent<AudioSource>();
+
+            PutWeaponInHand(currentWeaponConfig);
+            w_hook = GetComponentInChildren<WeaponHook>();
+            if(w_hook != null)
+                w_hook.CloseDamageColliders();
+            //SetAttackAnimation();
+        }
+
+        private void Update()
+        {
+            bool targetIsDead;
+            bool targetIsOutOfRange;
+
+            if (target == null)
+            {
+                targetIsDead = false;
+                targetIsOutOfRange = false;
+            }
+            else
+            {
+                //test to see if target is dead
+                var targetHealth = target.GetComponent<StateManager>().characterStats._health;
+                targetIsDead = targetHealth <= Mathf.Epsilon;
+                //test if target is out of range
+                var distanceToTarget = Vector3.Distance(transform.position, target.transform.position);
+                targetIsOutOfRange = distanceToTarget > currentWeaponConfig.GetMaxAttackRange();
+            }
+
+            if(character.isAlive == false || targetIsOutOfRange || targetIsDead)
+            {
+                StopAllCoroutines();
+            }
+        }
+
+        public WeaponConfig GetCurrentWeapon()
+        {
+            return currentWeaponConfig;
+        }
+
+        public void StopAttacking()
+        {
+            animator.StopPlayback();
+            StopAllCoroutines();
+        }
+
+        private void SetAttackAnimation()
+        {
+
+            int n = Random.Range(0, attackanimations.Length);
+            var targetAnim = attackanimations[n];
+            animator.Play(targetAnim.name);
+            PlayAttackSound();
+            // move picked clip to index 0 so it's not picked next time
+            attackanimations[n] = attackanimations[0];
+            attackanimations[0] = targetAnim;
+        }
+
+        public void PutWeaponInHand(WeaponConfig weaponToUse)
+        {
+            currentWeaponConfig = weaponToUse;
+            var weaponPrefab = weaponToUse.GetWeaponPrefab();
+            GameObject dominantHand = RequestDominantHand();
+            Destroy(weaponObject);//empties hands
+            weaponObject = Instantiate(weaponPrefab, dominantHand.transform);
+            weaponObject.transform.localPosition = currentWeaponConfig.gripTransform.localPosition;
+            weaponObject.transform.localRotation = currentWeaponConfig.gripTransform.localRotation;
+        }
+
+        private GameObject RequestDominantHand()
+        {
+            var dominantHands = GetComponentsInChildren<DominantHand>();
+            int numberOfDominantHands = dominantHands.Length;
+            Assert.IsFalse(numberOfDominantHands <= 0, "No DominantHand script found on Player, Please add one");
+            Assert.IsFalse(numberOfDominantHands > 1, "Multiple DominantHand scripts on player, Please remove one");
+            return dominantHands[0].gameObject;
+
+        }
+
+        public void AttackTarget(GameObject targetToAttack)
+        {
+            target = targetToAttack;
+            StartCoroutine(AttackTargetRepeatedly());
+        }
+
+        IEnumerator AttackTargetRepeatedly()
+        {
+            bool attackerStillAlive = GetComponent<HealthSystem>().healthAsPercentage >= Mathf.Epsilon;
+            bool targetIsStillAlive = target.GetComponent<StateManager>().characterStats._health >= Mathf.Epsilon;
+
+            while (attackerStillAlive && targetIsStillAlive)
+            {
+                var animationClip = currentWeaponConfig.GetAttackAnimClip();
+                
+                float animationClipTime = animationClip.length/ character.GetAnimSpeedMultiplier();
+                float timeToWait = animationClipTime + currentWeaponConfig.GetTimeBetweenAnimationCycles();
+                //float weaponHitPeriod = currentWeaponConfig.GetTimeBetweenAnimationCycles() + attackDelay;
+                //float timeToWait = weaponHitPeriod * character.GetAnimSpeedMultiplier();
+                bool isTimeToHitAgain = Time.time - lastHitTime > timeToWait;
+                if (isTimeToHitAgain)
+                {
+                    AttackTargetOnce();
+                    lastHitTime = Time.time;
+                }
+                yield return new WaitForSeconds(timeToWait);
+            }
+        }
+
+         void AttackTargetOnce()
+        {
+            transform.LookAt(target.transform);
+            float damageDelay = currentWeaponConfig.GetDamageDelay();
+            SetAttackAnimation();
+            if (isRangedAttacker == false)
+            {
+                StartCoroutine(OpenCloseColliders());
+                //StartCoroutine(DamageAfterDelay(damageDelay));
+            }
+            else if(isRangedAttacker == true)
+            {
+                FireProjectile();
+            }
+        }
+
+        IEnumerator OpenCloseColliders()
+        {
+            yield return new WaitForSeconds(.3f);
+            w_hook.OpenDamageColliders();
+            yield return new WaitForSeconds(.6f);
+            w_hook.CloseDamageColliders();
+        }
+
+        IEnumerator DamageAfterDelay(float delay)
+        {
+            yield return new WaitForSecondsRealtime(delay);
+            target.GetComponent<StateManager>().TakeDamage(CalculateDamage());
+        }
+
+        public void OpenDamageColliders()
+        {
+            w_hook.OpenDamageColliders();
+        }
+
+        public void CloseDamageColliders()
+        {
+            w_hook.CloseDamageColliders();
+        }
+
+        public float CalculateDamage()
+        {
+           return baseDamage + currentWeaponConfig.GetAdditionalDamage();
+        }
+
+        public void PlayAttackSound()
+        {
+            int n = Random.Range(1, m_AttackSounds.Length);
+            attackAudioSource.clip = m_AttackSounds[n];
+            attackAudioSource.PlayOneShot(attackAudioSource.clip);
+            // move picked sound to index 0 so it's not picked next time
+            m_AttackSounds[n] = m_AttackSounds[0];
+            m_AttackSounds[0] = attackAudioSource.clip;
+        }
+
+        void FireProjectile()
+        {
+            GameObject newProjectile = Instantiate(projectileToUse, projectileSocket.transform.position, Quaternion.identity);
+            Projectile projectileComponent = newProjectile.GetComponent<Projectile>();
+            projectileComponent.SetDamage(CalculateDamage());
+            projectileComponent.SetShooter(gameObject);
+
+            Vector3 unitVectorToPlayer = (target.transform.position + aimOffset - projectileSocket.transform.position).normalized;
+            float projectileSpeed = projectileComponent.GetDefaultLaunchSpeed();
+            newProjectile.GetComponent<Rigidbody>().velocity = unitVectorToPlayer * projectileSpeed;
+        }
+    }
+}
