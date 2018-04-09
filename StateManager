@@ -1,0 +1,1491 @@
+using System.Collections;
+using System.Collections.Generic;
+using UnityEngine;
+using RPG.Inventory;
+using UnityEngine.SceneManagement;
+
+namespace RPG.Characters
+{
+    public class StateManager : MonoBehaviour
+    {
+        [Header("Init")]
+        public GameObject activeModel;
+
+        [Header("Stats")]
+        public Attributes attributes;
+        public CharacterStats characterStats;
+        public float staminaRecovery;
+
+        [Header("Inputs")]
+        public float vertical;
+        public float horizontal;
+        public Vector3 playerInput;
+        public Vector3 rotateDirection;
+        public bool rt, rb, lt, lb;
+        public bool rollInput;
+        public bool itemInput;
+        [HideInInspector]
+        public Transform mTransform;
+
+        [Header("Stats")]
+        public float toGround = 0.5f;
+        public float rollSpeed = 1;
+        public float parryOffset = 1.4f;
+        public float backStabOffset = 1.4f;
+
+        [Header("Movement")]
+        [SerializeField] float moveSpeedMultiplier = .7f;
+        public float moveSpeed = 2;
+        public float moveAmount;
+        public float runSpeed = 3.5f;
+        public float movingTurnSpeed = 360;
+        public float stationaryTurnSpeed = 180;
+        public float rotateSpeed = 5;
+        public float moveThreshold = 1f;
+        public float animationSpeedMultiplier = .7f;
+
+        [Header("States")]
+        public bool isAlive;
+        public bool onGround;
+        public bool run;
+        public bool lockOn;
+        public bool inAction;
+        public bool canMove;
+        public bool damageIsOn;
+        public bool canRotate;
+        public bool canAttack;
+        public bool isSpellcasting;
+        public bool enableIK;
+        public bool isTwoHanded;
+        public bool usingItem;
+        public bool canBeParried;
+        public bool parryIsOn;
+        public bool isBlocking;
+        public bool isLeftHand;
+        public bool onEmpty;
+        public bool closeWeapons;
+        public bool isInvicible;
+        public bool isAiming;
+        public bool isRolling;
+
+        [Header("Other")]
+        [SerializeField] AudioClip blockAudio;
+        [HideInInspector]
+        public EnemyTarget lockOntarget;
+        [HideInInspector]
+        public Transform lockOnTransform;
+        [HideInInspector]
+        public AnimationCurve roll_curve;
+        bool characterDies;
+        GameObject crosshair;
+        //public EnemyStates parryTarget;
+
+        [HideInInspector]
+        public InputHandler playerComponent;
+        [HideInInspector]
+        public Animator anim;
+        [HideInInspector]
+        public Rigidbody rigidBody;
+        [HideInInspector]
+        public AnimatorHook a_hook;
+        [HideInInspector]
+        public ActionManager actionManager;
+        [HideInInspector]
+        public InventoryManager inventoryManager;
+        [HideInInspector]
+        public PickableItemManager pickManager;
+
+        [HideInInspector]
+        public float delta;
+        [HideInInspector]
+        public LayerMask ignoreLayers;
+        [HideInInspector]
+        public LayerMask ignoreForGroundCheck;
+
+        [HideInInspector]
+        public ActionManager.Action currentAction;
+        [HideInInspector]
+        public ActionManager.Action slot;
+        [HideInInspector]
+        public float airTimer;
+        [HideInInspector]
+        public ActionManager.ActionInput storeActionInput;
+        [HideInInspector]
+        public ActionManager.ActionInput storePrevAction;
+
+        float _actionDelay;
+        public bool enableItem;
+
+
+        private void Start()
+        {
+            crosshair = UIManager.singleton.crosshair;
+        }
+
+        public void Init()
+        {
+            mTransform = this.transform;
+
+            playerComponent = GetComponent<InputHandler>();
+
+            SetupAnimator();
+            rigidBody = GetComponent<Rigidbody>();
+            rigidBody.angularDrag = 999;
+            rigidBody.drag = 4;
+            rigidBody.constraints = RigidbodyConstraints.FreezeRotationX | RigidbodyConstraints.FreezeRotationZ;
+
+            //boneHelper = gameObject.AddComponent<BoneHelper>();
+
+            inventoryManager = GetComponent<InventoryManager>();
+            inventoryManager.Init(this);
+
+            actionManager = GetComponent<ActionManager>();
+            actionManager.Init(this);
+
+            a_hook = activeModel.GetComponent<AnimatorHook>();
+            if(a_hook == null)
+                a_hook = activeModel.AddComponent<AnimatorHook>();
+            a_hook.Init(this, null);
+
+            gameObject.layer = 8;
+            ignoreLayers = ~(1 << 8);
+            ignoreForGroundCheck = ~(1 << 9 | 1 << 10);
+
+            anim.SetBool(StaticStrings.onGround, true);
+
+            pickManager = GetComponent<PickableItemManager>();
+            SessionManager.singleton.InitWorldInteractions();
+
+            characterStats.InitCurrent();
+            UIManager ui = UIManager.singleton;
+            ui.AffectAll(characterStats.hp, characterStats.mp, characterStats.stamina);
+            ui.InitSouls(characterStats._souls);
+            prevGround = true;
+
+            isAlive = true;
+            DialogueManager.singleton.Init(this.transform);
+            onEmpty = true;
+            onEmpty = anim.GetBool(StaticStrings.onEmpty);
+        }
+
+        void SetupAnimator()
+        {
+            if (activeModel == null)
+            {
+                anim = GetComponentInChildren<Animator>();
+                if (anim == null)
+                {
+                    Debug.Log("No model found");
+                }
+                else
+                {
+                    activeModel = anim.gameObject;
+                }
+            }
+
+            if (anim == null)
+                anim = activeModel.GetComponent<Animator>();
+
+            anim.applyRootMotion = false;
+
+            anim.GetBoneTransform(HumanBodyBones.LeftHand).localScale = Vector3.one;
+            anim.GetBoneTransform(HumanBodyBones.RightHand).localScale = Vector3.one;
+        }
+
+        public void FixedTick(float d)
+        {
+            delta = d;
+            anim.SetBool(StaticStrings.blocking, isBlocking);
+            anim.SetBool(StaticStrings.Run, run);
+            //HandleBlocking();
+            HandleAimInput();
+            HandleAirTime();
+            usingItem = anim.GetBool(StaticStrings.Interacting);
+            enableItem = anim.GetBool(StaticStrings.enableItem);
+            anim.SetBool(StaticStrings.spellcasting, isSpellcasting);
+            HandleWeaponModelVisibility();
+
+            if (isBlocking == false && isSpellcasting == false)
+            {
+                enableIK = false;
+            }
+
+            HandleInActionTimer();
+            if (inAction)
+                return;
+            if (!inAction)
+            {
+                canMove = true;
+                canAttack = true;
+            }
+
+            onEmpty = anim.GetBool(StaticStrings.onEmpty);
+
+            if (canRotate)
+            {
+                HandleRotation();
+            }
+
+            if (!onEmpty && !canMove && !canAttack) //Animation is playing
+                return;
+
+            closeWeapons = false;
+
+            if (canMove && !onEmpty)
+            {
+                if (moveAmount > 0.3f)
+                {
+                    anim.CrossFade("Empty Override", 0.1f);
+                    onEmpty = true;
+                }
+            }
+
+            if (canAttack)
+                DetectAction();
+            if (canMove)
+            {
+                DetectItemAction();
+            }
+
+            anim.applyRootMotion = false;
+            HandleAnimationAll();
+            //rigidBody.drag = (moveAmount > 0 || onGround == false) ? 0 : 4;
+
+            float targetSpeed = moveSpeed;
+            if (usingItem || isSpellcasting || isAiming)
+            {
+                run = false;
+                moveAmount = Mathf.Clamp(moveAmount, 0, 0.45f);
+            }
+
+            if (run)
+                targetSpeed = runSpeed;
+
+            if (onGround && canMove)
+                rigidBody.velocity = playerInput * (targetSpeed * moveAmount);
+
+            if (run)
+                lockOn = false;
+
+            HandleRotation();
+
+            anim.SetBool(StaticStrings.Lockon, lockOn);
+
+            if (lockOn == false)
+                HandleMovementAnimations();
+            else
+                HandleLockOnAnimations(playerInput);
+
+            a_hook.useIk = enableIK;
+            //anim.SetBool(StaticStrings.blocking, isBlocking);
+            anim.SetBool(StaticStrings.isLeft, isLeftHand);
+
+            //HandleBlocking();
+
+            if (isSpellcasting)
+            {
+                HandleSpellcasting();
+                return;
+            }
+
+            //a_hook.CloseRoll();
+            HandleRolls();
+        }
+
+        public void Tick(float d)
+        {
+            delta = d;
+            gunTimer += Time.deltaTime;
+            //a_hook.HandleRightHand(inventoryManager.rightHandWeapon);
+            if (gunTimer >= timeBetweenBullets * effectsDisplayTime)
+            {
+                DisableGunEffects();
+            }
+            onGround = OnGround();
+            anim.SetBool(StaticStrings.onGround, onGround);
+
+            if (!onGround)
+                airTimer += delta;
+            else
+                airTimer = 0;
+
+            HandleBlocking();
+            pickManager.Tick();
+        }
+
+        void HandleInActionTimer()
+        {
+            if (inAction)
+            {
+                anim.applyRootMotion = true;
+
+                _actionDelay += delta;
+                if (_actionDelay > 2f)
+                {
+                    inAction = false;
+                    _actionDelay = 0;
+                }
+                else
+                {
+
+                }
+            }
+        }
+
+        void HandleEnableIK()
+        {
+            if (isBlocking == false && isSpellcasting == false)
+            {
+                enableIK = false;
+            }
+        }
+
+        void HandleWeaponModelVisibility()
+        {
+            if (!closeWeapons)
+            {
+                GameObject mm = null;
+
+                if (inventoryManager.rightHandWeapon != null)
+                {
+                    mm = inventoryManager.rightHandWeapon.weaponModel;
+                }
+
+                if (mm == null)
+                {
+                    if (inventoryManager.leftHandWeapon != null)
+                    {
+                        mm = inventoryManager.leftHandWeapon.weaponModel;
+                    }
+                }
+
+                if (mm != null)
+                {
+                    mm.SetActive(!usingItem);
+                }
+
+                if (!isTwoHanded)
+                {
+                    if (inventoryManager.leftHandWeapon != null && inventoryManager.rightHandWeapon != null)
+                        inventoryManager.leftHandWeapon.weaponModel.SetActive(true);
+                }
+
+                if (inventoryManager.curConsumable != null)
+                {
+                    if (inventoryManager.curConsumable.itemModel != null)
+                        inventoryManager.curConsumable.itemModel.SetActive(enableItem);
+                }
+            }
+            else
+            {
+                if (inventoryManager.rightHandWeapon != null)
+                    inventoryManager.rightHandWeapon.weaponModel.SetActive(false);
+                if (inventoryManager.leftHandWeapon != null)
+                    inventoryManager.leftHandWeapon.weaponModel.SetActive(false);
+            }
+        }
+
+        void HandleInvicibilityFrames()
+        {
+            if (isInvicible)
+            {
+                i_timer += delta;
+                if (i_timer > 0.5f)
+                {
+                    i_timer = 0;
+                    isInvicible = false;
+                }
+            }
+        }
+
+        void HandleRotation()
+        {
+            if (!isAiming)
+                rotateDirection = playerInput;
+
+            Vector3 targetDir = rotateDirection;
+            targetDir.y = 0;
+
+            if (targetDir == Vector3.zero)
+                targetDir = mTransform.forward;
+
+            Quaternion lookDir = Quaternion.LookRotation(targetDir);
+            Quaternion targetRot = Quaternion.Slerp(mTransform.rotation, lookDir, rotateSpeed * delta);
+            mTransform.rotation = targetRot;
+
+            //if (!isAiming) { }
+            //Vector3 targetDir = (lockOn == false) ?
+            //    playerInput
+            //    :
+            //    (lockOnTransform != null) ?
+            //        lockOnTransform.transform.position - transform.position
+            //        :
+            //        playerInput;
+
+            //targetDir.y = 0;
+            //if (targetDir == Vector3.zero)
+            //    targetDir = transform.forward;
+            //Quaternion tr = Quaternion.LookRotation(targetDir);
+            //Quaternion targetRotation = Quaternion.Slerp(transform.rotation, tr, delta * moveAmount * rotateSpeed);
+            //transform.rotation = targetRotation;
+        }
+
+#region Actions
+        public void DetectItemAction()
+        {
+            if (onEmpty == false || usingItem || isBlocking)
+                return;
+
+            if (itemInput == false)
+                return;
+
+            if (inventoryManager.curConsumable == null)
+                return;
+
+            if (inventoryManager.curConsumable.itemCount < 1 && inventoryManager.curConsumable.unlimitedCount == false)
+                return;
+
+            RuntimeConsumable slot = inventoryManager.curConsumable;
+            string targetAnim = slot.instance.targetAnim;
+            if (string.IsNullOrEmpty(targetAnim))
+                return;
+
+            usingItem = true;
+            anim.Play(targetAnim);
+        }
+
+        public void DetectAction()
+        {
+            if (canAttack == false && (onEmpty == false || usingItem || isSpellcasting))
+                return;
+
+            if (rb == false && rt == false && lt == false && lb == false)
+                return;
+
+            ActionManager.ActionInput targetInput = actionManager.GetActionInput(this);
+            storeActionInput = targetInput;
+            if (onEmpty == false)
+            {
+                a_hook.killDelta = true;
+                targetInput = storePrevAction;
+            }
+
+            storePrevAction = targetInput;
+            slot = actionManager.GetActionFromInput(targetInput);
+            if (slot == null)
+                return;
+
+            switch (slot.type)
+            {
+                case ActionManager.ActionType.attack:
+                    AttackAction(slot);
+                    break;
+                case ActionManager.ActionType.block:
+                    BlockAction(slot);
+                    break;
+                case ActionManager.ActionType.spells:
+                    SpellAction(slot);
+                    break;
+                case ActionManager.ActionType.parry:
+                    ParryAction(slot);
+                    break;
+                case ActionManager.ActionType.aim:
+                    AimAction(slot);
+                    break;
+                case ActionManager.ActionType.shoot:
+                    ShootAction(slot);
+                    break;
+                default:
+                    break;
+            }
+            
+        }
+
+        void AttackAction(ActionManager.Action slot)
+        {
+            if (characterStats._stamina < slot.staminaCost)
+                return;
+
+            if (CheckForParry(slot))
+                return;
+
+            if (CheckForBackstab(slot))
+                return;
+
+            string targetAnim = null;
+            targetAnim = 
+                slot.GetActionStep(ref actionManager.actionIndex)
+                .targetAnim;
+
+            if (string.IsNullOrEmpty(targetAnim))
+                return;
+
+            currentAction = slot;
+
+            float targetSpeed = 1;
+            if (slot.changeSpeed)
+            {
+                targetSpeed = slot.animSpeed;
+                if (targetSpeed == 0)
+                    targetSpeed = 1;
+            }
+
+            canBeParried = slot.canBeParried;
+            anim.SetFloat(StaticStrings.animSpeed, targetSpeed);
+            playerComponent.PlayAttackSound();
+            PlayAnimation(targetAnim, slot.mirror);
+            characterStats._stamina -= slot.staminaCost;
+            StartCoroutine(OpenCloseColliders());
+            //Debug.Log(slot.staminaCost);
+        }
+
+        IEnumerator OpenCloseColliders()
+        {
+            yield return new WaitForSeconds(.3f);
+            a_hook.OpenDamageColliders();
+            yield return new WaitForSeconds(.6f);
+            a_hook.CloseDamageColliders();
+        }
+        #region Aiming
+        void AimAction(ActionManager.Action slot)
+        {
+            isAiming = true;
+            HandleAiming();
+        }
+
+        [SerializeField] LineRenderer gunLine;
+        [SerializeField] AudioSource gunAudio;
+        [SerializeField] ParticleSystem gunParticles;
+        [SerializeField] Light gunLight;
+        [SerializeField] Transform pForward;
+        public float timeBetweenBullets = 0.15f;
+        float effectsDisplayTime = 0.2f;
+        float gunTimer;
+        Ray shootRay;
+        RaycastHit shootHit;
+        int shootableMask;
+        public float range = 100f;
+
+        void ShootAction(ActionManager.Action slot)
+        {
+            float manaCost = 20;
+            if (characterStats._mana < manaCost)
+                return;
+
+            if (gunTimer >= timeBetweenBullets)
+            {
+                if (isAiming)
+                {
+                    gunTimer = 0f;
+
+                    gunAudio.Play();
+                    gunLight.enabled = true;
+
+                    gunParticles.Stop();
+                    gunParticles.Play();
+
+                    gunLine.enabled = true;
+                    gunLine.SetPosition(0, pForward.position);
+
+                    shootRay = Camera.main.ViewportPointToRay(new Vector3(0.5f, 0.5f, 0f));
+                }
+                else
+                {
+                    // Reset the timer.
+                    gunTimer = 0f;
+
+                    gunAudio.Play();
+                    gunLight.enabled = true;
+
+                    gunParticles.Stop();
+                    gunParticles.Play();
+
+                    gunLine.enabled = true;
+                    gunLine.SetPosition(0, pForward.position);
+
+                    shootRay.origin = pForward.position;
+                    shootRay.direction = transform.forward;
+                }
+                if (Physics.Raycast(shootRay, out shootHit, range, ignoreLayers))
+                {
+                    Component damageableComponent = shootHit.collider.GetComponent<HealthSystem>();
+                    Shatter shatter = shootHit.collider.GetComponent<Shatter>();
+
+                    if (shatter != null)
+                    {
+                        shatter.Break();
+                    }
+
+                    if (damageableComponent != null)
+                    {
+                        shootHit.collider.GetComponent<HealthSystem>().TakeDamage(slot.damage);
+                        Debug.Log(slot.damage);
+                    }
+                    Component r_collider = shootHit.collider.GetComponent<Rigidbody>();
+                    if (r_collider != null)
+                    {
+                        // Add force to the rigidbody we hit, in the direction from which it was hit
+                        if(shootHit.collider.GetComponent<Character>() != null)
+                            shootHit.collider.GetComponent<Character>().myRigidbody.AddForce(-shootHit.normal * 100f);
+                    }
+                    gunLine.SetPosition(1, shootHit.point);
+                }
+                else
+                {
+                    gunLine.SetPosition(1, shootRay.origin + shootRay.direction * range);
+                }
+                characterStats._mana -= manaCost;
+                Debug.Log(slot.manaCost);
+            }
+        }
+
+        public void DisableGunEffects()
+        {
+            gunLine.enabled = false;
+            gunLight.enabled = false;
+        }
+
+        public void HandleAiming()
+        {
+            if (isAiming)
+            {
+                a_hook.HandleRightHand();
+                crosshair.SetActive(true);
+            }
+            else
+            {
+               crosshair.SetActive(false);
+            }
+        }
+
+        public void HandleAimInput()
+        {
+            if (rb == false && lb == false)
+            {
+                isAiming = false;
+                HandleAiming();
+            }
+
+        }
+
+        void HandleAnimationAll()
+        {
+            anim.SetBool("isAiming", isAiming);
+
+            if (isAiming)
+            {
+                HandleAnimationsAiming();
+            }
+            else
+            {
+                HandleAnimationsNormal();
+            }
+        }
+
+        void HandleAnimationsAiming()
+        {
+            float v = vertical;
+            float h = horizontal;
+            anim.SetFloat(StaticStrings.horizontal, h, 0.2f, delta);
+            anim.SetFloat(StaticStrings.vertical, v, 0.2f, delta);
+        }
+
+        void HandleAnimationsNormal()
+        {
+            if (moveAmount > 0.05f || !onGround || isRolling)
+            {
+                rigidBody.drag = 0;
+            }
+            else
+                rigidBody.drag = 4;
+
+            float anim_v = moveAmount;
+            anim.SetFloat(StaticStrings.vertical, anim_v, 0.15f, delta);
+        }
+
+        float recoilT;
+        bool recoilIsInit;
+        Vector3 offsetPosition;
+        Vector3 offsetRotation;
+        Vector3 basePosition;
+        Vector3 baseRotation;
+        public void RecoilActual()
+        {
+            if (recoilIsInit)
+            {
+                recoilT += delta * 3;
+                if (recoilT > 1)
+                {
+                    recoilT = 1;
+                    recoilIsInit = false;
+
+                }
+
+                //offsetPosition = Vector3.forward * curWeapon.w_actual.recoilZ.Evaluate(recoilT);
+                //offsetRotation = Vector3.right * 90 * curWeapon.w_actual.recoilY.Evaluate(recoilT);
+
+                //rh_target.localPosition = basePosition + offsetPosition;
+                //rh_target.localEulerAngles = baseRotation + offsetRotation;
+            }
+        }
+
+        #endregion
+
+        void SpellAction(ActionManager.Action slot)
+        {
+            if (characterStats._stamina < slot.staminaCost)
+                return;
+
+            if (slot.spellClass != inventoryManager.currentSpell.instance.spellClass 
+                || characterStats._mana < slot.manaCost)
+            {
+                PlayAnimation("cant_spell", slot.mirror);
+                return;
+            }
+
+            ActionManager.ActionInput inp = actionManager.GetActionInput(this);
+            if (inp == ActionManager.ActionInput.lb)
+                inp = ActionManager.ActionInput.rb;
+            if (inp == ActionManager.ActionInput.lt)
+                inp = ActionManager.ActionInput.rt;
+
+            Spell s_inst = inventoryManager.currentSpell.instance;
+            ActionManager.SpellAction s_slot = s_inst.GetAction(s_inst.actions, inp);
+            if (s_slot == null)
+            {
+                Debug.Log("Cant find spell slot");
+                return;
+            }
+
+            SpellEffectsManager.singleton.UseSpellEffect(s_inst.spell_effect, this);
+
+            isSpellcasting = true;
+            spellcastTime = 0;
+            max_spellCastTime = s_slot.castTime;
+            spellTargetAnim = s_slot.throwAnim;
+            spellIsMirrored = slot.mirror;
+            curSpellType = s_inst.spellType;
+
+            string targetAnim = s_slot.targetAnim;
+            if (spellIsMirrored)
+                targetAnim += StaticStrings._l;
+            else
+                targetAnim += StaticStrings._r;
+
+            projectileCanidate = inventoryManager.currentSpell.instance.projectile;
+            inventoryManager.CreateSpellParticle(inventoryManager.currentSpell, spellIsMirrored,
+                (s_inst.spellType == ActionManager.SpellType.looping));
+            anim.SetBool(StaticStrings.spellcasting, true);
+            anim.SetBool(StaticStrings.mirror, slot.mirror);
+            anim.CrossFade(targetAnim, 0.2f);
+            //PlayAnimation(targetAnim);
+
+            cur_manaCost = s_slot.manaCost;
+            cur_stamCost = s_slot.staminaCost;
+    
+            //a_hook.InitIKForBreathSpell(spellIsMirrored);
+
+            if (spellCast_start != null)
+                spellCast_start();
+        }
+
+        public float cur_manaCost;
+        public float cur_stamCost;
+        float spellcastTime;
+        float max_spellCastTime;
+        string spellTargetAnim;
+        bool spellIsMirrored;
+        ActionManager.SpellType curSpellType;
+        GameObject projectileCanidate;
+
+        public delegate void SpellCast_Start();
+        public delegate void SpellCast_Loop();
+        public delegate void SpellCast_Stop();
+        public SpellCast_Start spellCast_start;
+        public SpellCast_Loop spellCast_loop;
+        public SpellCast_Stop spellCast_stop;
+
+        void BlockAction(ActionManager.Action slot)
+        {
+            isBlocking = true;
+            run = false;
+            onEmpty = false;
+            //canMove = false;
+            inAction = true;
+            //enableIK = true;
+            //a_hook.InitIKForShield((slot.mirror));
+            isLeftHand = slot.mirror;
+            a_hook.currentHand = (slot.mirror) ? AvatarIKGoal.LeftHand : AvatarIKGoal.RightHand;
+
+            //block_idle_anim =
+            //    (isTwoHanded == false) ?
+            //    inventoryManager.GetCurrentWeapon(isLeftHand).oh_idle
+            //    : inventoryManager.GetCurrentWeapon(isLeftHand).th_idle
+            //    ;
+
+            //block_idle_anim += (isLeftHand) ? "_l" : "_r";
+
+            string targetAnim = slot.firstStep.targetAnim;
+            targetAnim += (isLeftHand) ? "_l" : "_r";
+            inventoryManager.OpenBlockCollider();
+            anim.Play(targetAnim);
+        }
+
+        void HandleBlocking()
+        {
+            if ((rb == false && lb == false) || characterStats._stamina < 1)
+            {
+                isBlocking = false;
+                inventoryManager.CloseBlockCollider();
+            }
+
+            if (isBlocking)
+                run = false;
+        }
+
+        void ParryAction(ActionManager.Action slot)
+        {
+            string targetAnim = null;
+            targetAnim = slot.GetActionStep(ref actionManager.actionIndex)
+                .targetAnim;
+
+            if (string.IsNullOrEmpty(targetAnim))
+                return;
+
+            float targetSpeed = 1;
+            if (slot.changeSpeed)
+            {
+                targetSpeed = slot.animSpeed;
+                if (targetSpeed == 0)
+                    targetSpeed = 1;
+            }
+
+            anim.SetFloat(StaticStrings.animSpeed, targetSpeed);
+            canBeParried = slot.canBeParried;
+            onEmpty = false;
+            canMove = false;
+            canAttack = false;
+            inAction = true;
+            anim.SetBool(StaticStrings.mirror, slot.mirror);
+            anim.CrossFade(targetAnim, .2f);
+            //PlayAnimation(targetAnim);
+        }
+        #endregion
+
+        void EmptySpellCastDelegates()
+        {
+            spellCast_start = null;
+            spellCast_loop = null;
+            spellCast_stop = null;
+        }
+
+        void HandleSpellcasting()
+        {
+            if(curSpellType == ActionManager.SpellType.looping)
+            {
+                enableIK = true;
+                a_hook.currentHand = (spellIsMirrored) ? AvatarIKGoal.LeftHand : AvatarIKGoal.RightHand;
+
+                if ((rb == false && lb == false )|| characterStats._mana < 2)
+                {
+                    isSpellcasting = false;
+                    enableIK = false;
+
+                    inventoryManager.breathCollider.SetActive(false);
+                    inventoryManager.blockCollider.SetActive(false);
+
+                    if (spellCast_stop != null)
+                        spellCast_stop();
+
+                    EmptySpellCastDelegates();
+
+                    return;
+                }
+
+                if (spellCast_loop != null)
+                    spellCast_loop();
+
+                characterStats._mana -= 0.5f;
+                return;
+            }
+
+            spellcastTime += delta;
+
+            if (inventoryManager.currentSpell.currentParticle != null)
+                inventoryManager.currentSpell.currentParticle.SetActive(true);
+
+            if (spellcastTime > max_spellCastTime)
+            {
+                onEmpty = false;
+                canMove = false;
+                canAttack = false;
+                inAction = true;
+                isSpellcasting = false;
+               
+                string targetAnim = spellTargetAnim;
+                anim.SetBool(StaticStrings.mirror, spellIsMirrored);
+                anim.CrossFade(targetAnim, 0.2f);
+                //PlayAnimation(targetAnim);
+            }
+        }
+
+        bool blockAnim;
+        string block_idle_anim;
+
+        public void ThrowProjectile()
+        {
+            if (projectileCanidate == null)
+                return;
+
+            GameObject go = Instantiate(projectileCanidate) as GameObject;
+            Transform p = anim.GetBoneTransform((spellIsMirrored) ? HumanBodyBones.LeftHand : HumanBodyBones.RightHand);
+            go.transform.position = p.position;
+
+            if (lockOnTransform && lockOn)
+                go.transform.LookAt(lockOnTransform.position);
+            else
+                go.transform.rotation = transform.rotation;
+
+            Projectiles proj = go.GetComponent<Projectiles>();
+            proj.Init();
+
+            characterStats._stamina -= cur_stamCost;
+            characterStats._mana -= cur_manaCost;
+        }
+
+        bool CheckForParry(ActionManager.Action slot)
+        {
+            if (slot.canParry == false)
+                return false;
+
+            EnemyStates parryTarget = null;
+            Vector3 origin = transform.position;
+            origin.y += 1;
+            Vector3 rayDir = transform.forward;
+            RaycastHit hit;
+            if(Physics.Raycast(origin,rayDir, out hit,3,ignoreLayers))
+            {
+                parryTarget = hit.transform.GetComponentInParent<EnemyStates>();
+            }
+
+            if (parryTarget == null)
+              return false;
+
+            if (parryTarget.parriedBy == null)
+                return false;
+
+      /*      float dis = Vector3.Distance(parryTarget.transform.position, transform.position);
+
+            if (dis > 3)
+                return false;*/
+
+            Vector3 dir = parryTarget.transform.position - transform.position;
+            dir.Normalize();
+            dir.y = 0;
+            float angle = Vector3.Angle(transform.forward, dir);
+
+            if(angle < 60)
+            {
+                Vector3 targetPosition = -dir * parryOffset;
+                targetPosition += parryTarget.transform.position;
+                transform.position = targetPosition;
+
+                if (dir == Vector3.zero)
+                    dir = -parryTarget.transform.forward;
+
+                Quaternion eRotation = Quaternion.LookRotation(-dir);
+                Quaternion ourRot = Quaternion.LookRotation(dir);
+
+                parryTarget.transform.rotation = eRotation;
+                transform.rotation = ourRot;
+
+                parryTarget.IsGettingParried(slot, inventoryManager.GetCurrentWeapon(slot.mirror));
+
+                onEmpty = false;
+                canMove = false;
+                canAttack = false;
+                inAction = true;
+                anim.SetBool(StaticStrings.mirror, slot.mirror);
+                anim.CrossFade(StaticStrings.parry_attack, .2f);
+                //PlayAnimation(StaticStrings.parry_attack);
+                lockOntarget = null;
+                return true;
+            }
+
+            return false;
+        }
+
+        bool CheckForBackstab(ActionManager.Action slot)
+        {
+            if (slot.canBackStab == false)
+                return false;
+
+            EnemyStates backstab = null;
+            Vector3 origin = transform.position;
+            origin.y += 1;
+            Vector3 rayDir = transform.forward;
+            RaycastHit hit;
+            if (Physics.Raycast(origin, rayDir, out hit, 1, ignoreLayers))
+            {
+                backstab = hit.transform.GetComponentInParent<EnemyStates>();
+            }
+
+            if (backstab == null)
+                return false;
+
+            Vector3 dir = transform.position - backstab.transform.position;
+            dir.Normalize();
+            dir.y = 0;
+            float angle = Vector3.Angle(backstab.transform.forward, dir);
+
+            if (angle > 150)
+            {
+
+                Vector3 targetPosition = dir * backStabOffset;
+                targetPosition += backstab.transform.position;
+                transform.position = targetPosition;
+
+                backstab.transform.rotation = transform.rotation;
+                backstab.IsGettingBackStabbed(slot, inventoryManager.GetCurrentWeapon(slot.mirror));
+
+                onEmpty = false;
+                canMove = false;
+                canAttack = false;
+                inAction = true;
+                anim.SetBool(StaticStrings.mirror, slot.mirror);
+                anim.CrossFade(StaticStrings.parry_attack, 0.2f);
+                lockOntarget = null;
+                return true;
+            }
+
+            return false;
+        }
+
+        float i_timer;
+
+        void HandleRolls()
+        {
+            if (!rollInput || usingItem)
+                return;
+
+            float v = vertical;
+            float h = horizontal;
+            v = (moveAmount > 0.3f) ? 1 : 0;
+            h = 0;
+
+            a_hook.rootMotionMultiplier = rollSpeed;
+            if (v != 0)
+            {
+                if (playerInput == Vector3.zero)
+                    playerInput = transform.forward;
+                Quaternion targetRot = Quaternion.LookRotation(playerInput);
+                transform.rotation = targetRot;
+            }
+
+            anim.SetFloat(StaticStrings.vertical, v);
+            anim.SetFloat(StaticStrings.horizontal,h);
+            anim.CrossFade(StaticStrings.Rolls, .2f);
+            //PlayAnimation(StaticStrings.Rolls);
+            isBlocking = false;
+        }
+
+        public void GetRun(out float speed)
+        {
+            speed = run ? runSpeed : moveSpeed;
+        }
+
+        void HandleMovementAnimations()
+        {
+            //anim.SetBool(StaticStrings.Run, run);
+            //anim.SetFloat(StaticStrings.vertical, moveAmount, 0.4f, delta);
+        }
+
+        void HandleLockOnAnimations(Vector3 moveDir)
+        {
+            Vector3 relativeDir = transform.InverseTransformDirection(moveDir);
+            float h = relativeDir.x;
+            float v = relativeDir.z;
+
+            anim.SetFloat(StaticStrings.vertical, v, 0.2f, delta);
+            anim.SetFloat(StaticStrings.horizontal, h, 0.2f, delta);
+        }
+
+        #region Jumping
+
+        void HandleAirTime()
+        {
+            if (!onGround)
+            {
+                airTimer += delta;
+                rigidBody.angularDrag = 0;
+                rigidBody.drag = 0;
+            }
+            else
+            {
+                rigidBody.angularDrag = 999;
+                rigidBody.drag = 4;
+                airTimer = 0;
+            }
+
+        }
+
+        public void Jump()
+        {
+            if (onGround)
+            {
+                a_hook.jumping = true;
+                onEmpty = false;
+                canMove = false;
+                canAttack = false;
+                inAction = true;
+                run = false;
+                anim.Play(StaticStrings.Jump_start);
+                isBlocking = false;
+                skipGroundCheck = true;
+                Vector3 targetVel = transform.forward * 7;
+                targetVel.y = 5;
+                rigidBody.velocity = targetVel;
+            }
+        }
+
+        bool skipGroundCheck;
+        float skipTimer;
+        bool prevGround;
+
+        public bool OnGround()
+        {
+            if (skipGroundCheck)
+            {
+                skipTimer += delta;
+                if (skipTimer > 0.2f)
+                    skipGroundCheck = false;
+                prevGround = false;
+                return false;
+            }
+            skipTimer = 0;
+
+            bool r = false;
+
+            Vector3 origin = transform.position + (Vector3.up * toGround);
+            Vector3 dir = -Vector3.up;
+            float dis = toGround + 0.3f;
+            RaycastHit hit;
+            Debug.DrawRay(origin, dir * dis);
+            if(Physics.Raycast(origin,dir,out hit, dis, ignoreForGroundCheck))
+            {
+                r = true;
+                Vector3 targetPosition = hit.point;
+                transform.position = targetPosition;
+            }
+
+            if(r && !prevGround)
+            {
+                Land();
+            }
+
+            prevGround = r;
+            return r;
+        }
+
+        void Land()
+        {
+            a_hook.jumping = false;
+            if (airTimer < 0.8f)
+                return;
+
+            onEmpty = false;
+            canMove = false;
+            canAttack = false;
+            inAction = true;
+            isBlocking = false;
+           
+            //if (moveAmount == 0)
+            //{
+            //    anim.Play(StaticStrings.Jump_land);
+            //}
+            //else
+            //{         
+            if (playerInput == Vector3.zero)
+                playerInput = transform.forward;
+            Quaternion targetRot = Quaternion.LookRotation(playerInput);
+            transform.rotation = targetRot;
+            //a_hook.InitForRoll();
+            //a_hook.rm_multi = rollSpeed;
+
+            anim.SetFloat(StaticStrings.vertical, 1);
+            anim.SetFloat(StaticStrings.horizontal, 0);
+            // anim.CrossFade(StaticStrings.Rolls, 0.2f);
+            playerComponent.PlayLandingSound();
+            anim.Play(StaticStrings.Jump_land);
+        }
+#endregion
+
+        public void InteractLogic()
+        {
+            if(pickManager.interCandidate.actionType == UIActionType.talk)
+            {
+                pickManager.interCandidate.InteractActual();
+                return;
+            }
+
+
+            Interactions inter = ResourceManager.singleton.GetInteractions(pickManager.interCandidate.interactionId);
+
+            if(inter.oneShot)
+            {
+                if(pickManager.inters.Contains(pickManager.interCandidate))
+                {
+                    pickManager.inters.Remove(pickManager.interCandidate);
+                }
+            }
+
+            if(!string.IsNullOrEmpty(inter.specialEvent))
+            {
+                SessionManager.singleton.PlayEvent(inter.specialEvent);
+            }
+
+            Vector3 targetDir = pickManager.interCandidate.transform.position - transform.position;
+            SnapToRotation(targetDir);
+
+            pickManager.interCandidate.InteractActual();
+            inAction = true;
+            //anim.CrossFade(inter.anim, .2f);
+            anim.Play(inter.anim);
+            //PlayAnimation(inter.anim);
+            pickManager.interCandidate = null;
+        }
+
+        public void SnapToRotation(Vector3 dir)
+        {
+            dir.Normalize();
+            dir.y = 0;
+            if (dir == Vector3.zero)
+                dir = transform.forward;
+            Quaternion t = Quaternion.LookRotation(dir);
+            transform.rotation = t;
+        }
+
+        public void PlayAnimation(string targetAnim, bool isMirrored)
+        {
+            isBlocking = false;
+            canAttack = false;
+            onEmpty = false;
+            canMove = false;
+            inAction = true;
+            anim.SetBool(StaticStrings.onEmpty, false);
+            anim.SetBool(StaticStrings.mirror, isMirrored);
+            anim.CrossFade(targetAnim, 0.2f);
+        }
+
+        public void HandleTwoHanded()
+        {
+            bool isRight = true;
+            if (inventoryManager.rightHandWeapon == null)
+                return;
+
+            Weapon w = inventoryManager.rightHandWeapon.instance;
+            if (w == null)
+            {
+                w = inventoryManager.leftHandWeapon.instance;
+                isRight = false;
+            }
+
+            if (w == null)
+            {
+                return;
+            }
+
+            if (isTwoHanded)
+            {
+                anim.CrossFade(w.th_idle,0.2f);
+                actionManager.UpdateActionsTwoHanded();
+
+                if(isRight)
+                {
+                    if (inventoryManager.leftHandWeapon != null)
+                        inventoryManager.leftHandWeapon.weaponModel.SetActive(false);
+                }
+                else
+                {
+                    if (inventoryManager.rightHandWeapon != null)
+                        inventoryManager.rightHandWeapon.weaponModel.SetActive(false);
+                }
+            }
+            else
+            {
+                string targetAnim = w.oh_idle;
+                targetAnim += (isRight) ? StaticStrings._r : StaticStrings._l;
+                anim.CrossFade(targetAnim,0.2f);
+                anim.Play(StaticStrings.equipWeapon_oh);
+                actionManager.UpdateActionsOneHanded();
+
+                if (isRight)
+                {
+                    if (inventoryManager.leftHandWeapon != null)
+                        inventoryManager.leftHandWeapon.weaponModel.SetActive(true);
+                }
+                else
+                {
+                    if (inventoryManager.rightHandWeapon != null)
+                        inventoryManager.rightHandWeapon.weaponModel.SetActive(true);
+                }
+            }
+        }
+
+        public void IsGettingParried()
+        {
+
+        }
+
+        public void AffectBlocking()
+        {
+            isBlocking = true;
+        }
+
+        public void StopAffectingBlocking()
+        {
+            isBlocking = false;
+        }
+
+        #region Stats
+        public void AddHealth()
+        {
+            characterStats.hp++;
+        }
+
+        public void BonfireHeal()
+        {
+            characterStats._health = Mathf.Clamp(characterStats._health + 1000, 0f, characterStats.hp);
+            characterStats._mana = Mathf.Clamp(characterStats._mana + 1000, 0f, characterStats.mp);
+        }
+        public void MonitorStats()
+        {
+            if(run && moveAmount > 0)
+            {
+                characterStats._stamina -= delta * 5;
+            }
+            else if(!isBlocking)
+            {
+                characterStats._stamina += delta *staminaRecovery;
+            }
+
+            if (characterStats._stamina > characterStats.stamina)
+                characterStats._stamina = characterStats.stamina;
+
+            characterStats._health = Mathf.Clamp(characterStats._health, 0, characterStats.hp);
+            characterStats._mana = Mathf.Clamp(characterStats._mana, 0, characterStats.mp);
+        }
+
+        public void SubstractStaminaOverTime()
+        {
+            characterStats._stamina -= cur_stamCost;
+        }
+
+        public void SubtractManaOverTime()
+        {
+            characterStats._mana -= cur_manaCost;
+        }
+#endregion
+
+
+        #region Damage
+        public void BlockAttack()
+        {
+            anim.Play("block");
+            gunAudio.PlayOneShot(blockAudio);
+            characterStats._stamina -= 20f;
+            Debug.Log("Blocked!!!");
+        }
+
+        public void DoDamage(AIAttacks a)
+        {
+            if(isInvicible)
+                return;
+
+            int damage = 15;
+
+            characterStats._health -= damage;
+            characterDies = (characterStats._health <= Mathf.Epsilon);
+            if (characterDies)
+            {
+                StartCoroutine(KillCharacter());
+            }
+            if (a.hasReactAnim)
+            {
+                anim.Play(a.reactAnim);
+            }
+            else
+            {
+                int ran = Random.Range(0, 100);
+                string tA = (ran > 50) ? StaticStrings.damage1 : StaticStrings.damage2;
+                anim.Play(tA);
+            }
+
+           
+            canRotate = false;
+            anim.SetBool(StaticStrings.onEmpty, false);
+            canMove = false;
+            onEmpty = false;
+            inAction = true;
+            canAttack = false;
+            isInvicible = true;
+            anim.applyRootMotion = true;
+        }
+
+        public void TakeDamage(float damage)
+        {
+            characterStats._health = Mathf.Clamp(characterStats._health - damage, 0f, characterStats.hp);
+            characterDies = (characterStats._health <= Mathf.Epsilon);
+
+            if (characterDies)
+            {
+                StartCoroutine(KillCharacter());
+                return;
+            }
+
+            //canRotate = false;
+            //anim.SetBool(StaticStrings.onEmpty, false);
+            //canMove = false;
+            //onEmpty = false;
+            //inAction = true;
+            //canAttack = false;
+            //isInvicible = true;
+            //anim.applyRootMotion = true;
+
+
+            int ran = Random.Range(0, 100);
+            string tA = (ran > 50) ? StaticStrings.damage1 : StaticStrings.damage2;
+            anim.Play(tA);
+        }
+
+        IEnumerator KillCharacter()
+        {
+            isAlive = false;
+
+            if(anim != null)
+                anim.Play("dead1");
+
+            canRotate = false;
+            anim.SetBool(StaticStrings.onEmpty, false);
+            canMove = false;
+            onEmpty = false;
+            inAction = true;
+            canAttack = false;
+            isInvicible = true;
+            anim.applyRootMotion = true;
+
+            if (playerComponent && playerComponent.isActiveAndEnabled) // relying on lazy evaluation
+            {
+                yield return new WaitForSecondsRealtime(2f);
+                //SceneManager.UnloadSceneAsync(5);
+                SceneManager.LoadScene(7);
+
+            }
+            else // assume is enemy for now, reconsider on other NPCs
+            {
+
+            }
+        }
+#endregion
+    }
+}
