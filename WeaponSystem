@@ -46,10 +46,16 @@ namespace RPG.Characters
             if(attackAudioSource == null) {Debug.Log("Missing Audio Source");
             
             PutWeaponInHand(currentWeaponConfig);
+            
             w_hook = GetComponentInChildren<WeaponHook>();
             if(w_hook != null)
+            {
                 w_hook.CloseDamageColliders();
-            //SetAttackAnimation();
+            }
+            else 
+            { 
+                Debug.Log("Missing WeaponHook Script"); 
+            }
         }
 
         private void Update()
@@ -96,6 +102,7 @@ namespace RPG.Characters
             var targetAnim = attackanimations[n];
             animator.Play(targetAnim.name);
             PlayAttackSound();
+            
             // move picked clip to index 0 so it's not picked next time
             attackanimations[n] = attackanimations[0];
             attackanimations[0] = targetAnim;
