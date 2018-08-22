@@ -34,10 +34,17 @@ namespace RPG.Characters
         void Start()
         {
             animator = GetComponentInChildren<Animator>();
+            if(animator == null) {Debug.Log("Attach Animator");
+           
             character = GetComponent<EnemyCharacter>();
+            if(character == null) {Debug.Log("Missing EnemyCharacter script");
+            
             player = GameObject.FindGameObjectWithTag("Player");
+            if(player == null) {Debug.Log("Player not tagged in scene");
+            
             attackAudioSource = GetComponent<AudioSource>();
-
+            if(attackAudioSource == null) {Debug.Log("Missing Audio Source");
+            
             PutWeaponInHand(currentWeaponConfig);
             w_hook = GetComponentInChildren<WeaponHook>();
             if(w_hook != null)
